@@ -1,10 +1,24 @@
+param(
+    # ex. 'J:\src\app\bin\Release\net6.0-windows\publish\win-x86'
+    [Parameter(Mandatory = $true)]
+    [string] $SourceFolderPath,
+
+    # ex. 'J:\src\app\bin\Release\net6.0-windows\'
+    [Parameter(Mandatory = $true)]
+    [string] $ReplacedPartInSourceFolderPath,
+
+    # ex. $(var.app.TargetDir)
+    [Parameter(Mandatory = $true)]
+    [string] $ReplaceString
+)
+
 function New-ElementId
 {
     param(
         [Parameter(Mandatory = $true)]
         [string] $Prefix
     )
-    $Prefix + (New-Guid).Guid.ToString().Replace('-', '').ToUpperInvariant()
+    $Prefix + '_' + (New-Guid).Guid.ToString().Replace('-', '').ToLowerInvariant()
 }
 
 class BaseElement
@@ -20,39 +34,42 @@ class BaseElement
     }
 }
 
-class FileElement : BaseElement
-{
-    [string] $Source
-
-    FileElement([string] $Source)
-    {
-        $this.Id = New-ElementId -Prefix 'file'
-        $this.Source = $Source
-    }
-
-    [string] ToXmlString()
-    {
-        return '<File Id="{0}" KeyPath="yes" ReadOnly="yes" Source="{1}"/>' -f $this.Id, $this.Source
-    }
-}
-
-class ComponentElement : BaseElement
+class FragmentElement : BaseElement
 {
     [BaseElement[]] $Children
 
-    ComponentElement()
+    FragmentElement()
+    {}
+
+    [string] ToXmlString()
     {
-        $this.Id = New-ElementId -Prefix 'cmp'
+        $builder = [System.Text.StringBuilder]::new()
+        $builder.AppendLine('<Fragment>')
+        foreach ($c in $this.Children) {
+            $builder.AppendLine($c.ToXmlString())
+        }
+        $builder.Append('</Fragment>')
+        return $builder.ToString()
+    }
+}
+
+class DirectoryRefElement : BaseElement
+{
+    [BaseElement[]] $Children
+
+    DirectoryRefElement([string] $Id)
+    {
+        $this.Id = $Id
     }
 
     [string] ToXmlString()
     {
         $builder = [System.Text.StringBuilder]::new()
-        $builder.AppendLine('<Component Id="{0}">' -f $this.Id)
+        $builder.AppendLine('<DirectoryRef Id="{0}">' -f $this.Id)
         foreach ($c in $this.Children) {
             $builder.AppendLine($c.ToXmlString())
         }
-        $builder.Append('</Component>')
+        $builder.Append('</DirectoryRef>')
         return $builder.ToString()
     }
 }
@@ -80,11 +97,48 @@ class DirectoryElement : BaseElement
     }
 }
 
-class DirectoryRefElement : BaseElement
+class ComponentElement : BaseElement
 {
     [BaseElement[]] $Children
 
-    DirectoryRefElement([string] $Id)
+    ComponentElement()
+    {
+        $this.Id = New-ElementId -Prefix 'comp'
+    }
+
+    [string] ToXmlString()
+    {
+        $builder = [System.Text.StringBuilder]::new()
+        $builder.AppendLine('<Component Id="{0}">' -f $this.Id)
+        foreach ($c in $this.Children) {
+            $builder.AppendLine($c.ToXmlString())
+        }
+        $builder.Append('</Component>')
+        return $builder.ToString()
+    }
+}
+
+class FileElement : BaseElement
+{
+    [string] $Source
+
+    FileElement([string] $Source)
+    {
+        $this.Id = New-ElementId -Prefix 'file'
+        $this.Source = $Source
+    }
+
+    [string] ToXmlString()
+    {
+        return '<File Id="{0}" Source="{1}" KeyPath="yes" ReadOnly="yes"/>' -f $this.Id, $this.Source
+    }
+}
+
+class ComponentGroupElement : BaseElement
+{
+    [BaseElement[]] $Children
+
+    ComponentGroupElement([string] $Id)
     {
         $this.Id = $Id
     }
@@ -92,57 +146,132 @@ class DirectoryRefElement : BaseElement
     [string] ToXmlString()
     {
         $builder = [System.Text.StringBuilder]::new()
-        $builder.AppendLine('<DirectoryRef Id="{0}">' -f $this.Id)
+        $builder.AppendLine('<ComponentGroup Id="{0}">' -f $this.Id)
         foreach ($c in $this.Children) {
             $builder.AppendLine($c.ToXmlString())
         }
-        $builder.Append('</DirectoryRef>')
+        $builder.Append('</ComponentGroup>')
         return $builder.ToString()
     }
 }
 
-function Build-DirectoryStructure
+class ComponentRefElement : BaseElement
+{
+    ComponentRefElement([string] $Id)
+    {
+        $this.Id = $Id
+    }
+
+    [string] ToXmlString()
+    {
+        return '<ComponentRef Id="{0}"/>' -f $this.Id
+    }
+}
+
+function New-DirectoryRefFragment
 {
     param(
         [Parameter(Mandatory = $true)]
-        [string] $BaseDirectoryPath,
+        [string] $SourceFolderPath,
 
+        [Parameter(Mandatory = $true)]
+        [string] $ReplacedPartInSourceFolderPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $ReplaceString,
+
+        [Parameter(Mandatory = $true)]
+        [string] $DirectoryRefElementId
+    )
+
+    $dirRefElm = [DirectoryRefElement]::new($DirectoryRefElementId)
+
+    Add-ChildElement -ParentElememnt $dirRefElm -SourceFolderPath $SourceFolderPath -ReplacedPartInSourceFolderPath $ReplacedPartInSourceFolderPath -ReplaceString $ReplaceString
+
+    $fragmentElm = [FragmentElement]::new()
+    $fragmentElm.Children += $dirRefElm
+    $fragmentElm
+}
+
+function Add-ChildElement
+{
+    param(
         [Parameter(Mandatory = $true)]
         [BaseElement] $ParentElememnt,
 
         [Parameter(Mandatory = $true)]
-        [string] $PartOfPathToBeReplaced,
+        [string] $SourceFolderPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $ReplacedPartInSourceFolderPath,
 
         [Parameter(Mandatory = $true)]
         [string] $ReplaceString
     )
 
-    Get-ChildItem -File -LiteralPath $BaseDirectoryPath |
+    # Files
+    Get-ChildItem -File -LiteralPath $SourceFolderPath |
         ForEach-Object -Process {
-            $fileSource = $_.FullName.Replace($PartOfPathToBeReplaced, $ReplaceString)
-            $fileElm = [FileElement]::new($fileSource)
+            $fileSource = $_.FullName.Replace($ReplacedPartInSourceFolderPath, $ReplaceString)
             $componentElm = [ComponentElement]::new()
-            $componentElm.Children += $fileElm
+            $componentElm.Children += [FileElement]::new($fileSource)
             $ParentElememnt.Children += $componentElm
         }
 
-    Get-ChildItem -Directory -LiteralPath $BaseDirectoryPath |
+    # Folders
+    Get-ChildItem -Directory -LiteralPath $SourceFolderPath |
         ForEach-Object -Process {
             $directoryName = [System.IO.Path]::GetFileName($_.FullName)
             $dirElm = [DirectoryElement]::new($directoryName)
             $ParentElememnt.Children += $dirElm
-            Build-DirectoryStructure -BaseDirectoryPath $_.FullName -ParentElememnt $dirElm -PartOfPathToBeReplaced $PartOfPathToBeReplaced -ReplaceString $ReplaceString
+            Add-ChildElement -ParentElememnt $dirElm -SourceFolderPath $_.FullName -ReplacedPartInSourceFolderPath $ReplacedPartInSourceFolderPath -ReplaceString $ReplaceString
         }
 }
 
+function New-ComponentGroupFragment
+{
+    param(
+        [Parameter(Mandatory = $true)]
+        [BaseElement] $RootElement,
 
-$baseFolderPath = ''
-$partOfPathToBeReplaced = ''
-$replaceString = '$(var.DemoApp.TargetDir)'
+        [Parameter(Mandatory = $true)]
+        [string] $ComponentGroupElementId
+    )
 
-$dirRefElm = [DirectoryRefElement]::new('INSTALLFOLDER')
-Build-DirectoryStructure -BaseDirectoryPath $baseFolderPath -ParentElememnt $dirRefElm -PartOfPathToBeReplaced $partOfPathToBeReplaced -ReplaceString $replaceString
-$dirRefElm.ToXmlString() | clip
+    $compGroupElm = [ComponentGroupElement]::new($ComponentGroupElementId)
+   
+    Get-ChildComponentElement -RootElement $RootElement |
+        ForEach-Object -Process {
+            $compGroupElm.Children += [ComponentRefElement]::new($_.Id)
+        }
 
+    $fragmentElm = [FragmentElement]::new()
+    $fragmentElm.Children += $compGroupElm
+    $fragmentElm
+}
 
-# TODO: Generate ComponentGroup XML fragment.
+function Get-ChildComponentElement
+{
+    param(
+        [Parameter(Mandatory = $true)]
+        [BaseElement] $RootElement
+    )
+
+    foreach ($elm in $RootElement.Children) {
+        if ($elm -is [ComponentElement]) {
+            $elm
+        }
+        elseif ($elm -is [DirectoryElement]) {
+            Get-ChildComponentElement -RootElement $elm
+        }
+        elseif ($elm -is [DirectoryRefElement]) {
+            Get-ChildComponentElement -RootElement $elm
+        }
+    }
+}
+
+$drf = New-DirectoryRefFragment -SourceFolderPath $SourceFolderPath -ReplacedPartInSourceFolderPath $ReplacedPartInSourceFolderPath -ReplaceString $ReplaceString -DirectoryRefElementId 'INSTALLFOLDER'
+$drf.ToXmlString()
+
+$cgf = New-ComponentGroupFragment -RootElement $drf -ComponentGroupElementId 'ProductComponents'
+$cgf.ToXmlString()
